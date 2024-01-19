@@ -81,9 +81,11 @@ class MintMangaClient(MangaClient):
     async def pictures_from_chapters(self, content: bytes, response: ClientResponse = None):
         regex = rb"\[['\"](.*?)['\"],['\"]['\"],['\"](.*?)['\"],\d+,\d+\]"
 
-        images_url = [f'{a[0].decode()}{a[1].decode()}' for a in re.findall(regex, content)]
+        for item in content.split(b'\n'):
+            if b'rm_h.readerDoInit' in item:
+                images_url = [f'{a[0].decode()}{a[1].decode()}' for a in re.findall(regex, item)]
 
-        return images_url
+                return images_url
 
     async def search(self, query: str = '', page: int = 1) -> List[MangaCard]:
         request_url = self.search_url
