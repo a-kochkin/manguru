@@ -26,8 +26,7 @@ from tools.flood import retry_on_flood
 
 mangas: Dict[str, MangaCard] = dict()
 chapters: Dict[str, MangaChapter] = dict()
-pdfs: Dict[str, str] = dict()
-paginations: Dict[int, Pagination] = dict()
+paginations: Dict[str, Pagination] = dict()
 users_in_channel: Dict[int, dt.datetime] = dict()
 locks: Dict[int, asyncio.Lock] = dict()
 
@@ -90,20 +89,21 @@ def get_buttons_for_options(user_options: int):
     return InlineKeyboardMarkup(buttons)
 
 
-def get_buttons_for_chapters(pagination: Pagination):
-    results = pagination.get_chapters()
+def get_buttons_for_chapters(manga: MangaCard, page: int):
+    pagination = paginations[manga.unique()]
+    results = pagination.get_chapters(page)
 
-    prev = InlineKeyboardButton('<<', f'{pagination.id}_{pagination.page - 1}')
-    next_ = InlineKeyboardButton('>>', f'{pagination.id}_{pagination.page + 1}')
+    prev = pagination.get_prev_page(page)
+    next_ = pagination.get_next_page(page)
 
     footer = []
-    if not pagination.is_first_page:
-        footer.append(prev)
-    if not pagination.is_last_page:
-        footer.append(next_)
+    if prev:
+        footer.append(InlineKeyboardButton('<<', f'pagination_{manga.unique()}_{prev}'))
+    if next_:
+        footer.append(InlineKeyboardButton('>>', f'pagination_{manga.unique()}_{next_}'))
 
     return InlineKeyboardMarkup([footer] + [
-        [InlineKeyboardButton(result.name, result.unique())] for result in results
+        [InlineKeyboardButton(chapters[result].name, result)] for result in results
     ] + [footer])
 
 
@@ -256,27 +256,27 @@ async def on_message(client: Client, message: Message):
     manga = mangas[message.text]
 
     pagination = Pagination()
-    paginations[pagination.id] = pagination
+    paginations[message.text] = pagination
     results = await manga.client.get_chapters(manga)
     for result in results:
         chapters[result.unique()] = result
-    pagination.chapters = results
-    buttons = get_buttons_for_chapters(pagination)
+
+    pagination.chapters = [result.unique() for result in results]
+
+    buttons = get_buttons_for_chapters(manga, 1)
 
     try:
-        message = await bot.send_photo(message.from_user.id,
+        await bot.send_photo(message.from_user.id,
                                        manga.picture_url,
                                        f'{manga.name}\n'
                                        f'{manga.get_url()}', reply_markup=buttons)
-        pagination.message = message
     except pyrogram.errors.BadRequest:
         file_name = f'pictures/{manga.unique()}.jpg'
         await manga.client.get_cover(manga, cache=True, file_name=file_name)
-        message = await bot.send_photo(message.from_user.id,
+        await bot.send_photo(message.from_user.id,
                                        f'./cache/{manga.client.name}/{file_name}',
                                        f'{manga.name}\n'
                                        f'{manga.get_url()}', reply_markup=buttons)
-        pagination.message = message
 
 
 @bot.on_inline_query()
@@ -338,15 +338,12 @@ async def chapter_click(client, data, chat_id):
 
 
 async def pagination_click(client: Client, callback: CallbackQuery):
-    pagination_id, page = map(int, callback.data.split('_'))
-    pagination = paginations[pagination_id]
-    pagination.page = page
+    manga = mangas[callback.data.split('_')[1]]
+    page = int(callback.data.split('_')[2])
 
-    buttons = get_buttons_for_chapters(pagination)
+    buttons = get_buttons_for_chapters(manga, page)
 
-    await bot.edit_message_reply_markup(
-        callback.from_user.id,
-        pagination.message.id,
+    await callback.edit_message_reply_markup(
         reply_markup=buttons
     )
 
@@ -419,11 +416,28 @@ async def send_manga_chapter(client, data, chat_id):
                                                        f'error.\n\n{error_caption}')
             media_docs.append(InputMediaDocument(cbz, thumb=thumb_path))
 
+    pagination = paginations[chapter.manga.unique()]
+    prev = pagination.get_prev_chapter(data)
+    next_ = pagination.get_next_chapter(data)
+    footer = []
+    if next_:
+        footer.append(InlineKeyboardButton('Previous Chapter', next_))
+    if prev:
+        footer.append(InlineKeyboardButton('Next Chapter', prev))
+
     if len(media_docs) == 0:
-        messages: list[Message] = await retry_on_flood(bot.send_message)(chat_id, success_caption)
+        messages: list[Message] = await retry_on_flood(bot.send_message)(
+            chat_id,
+            success_caption,
+            reply_markup=InlineKeyboardMarkup([footer])
+        )
     else:
         media_docs[-1].caption = success_caption
-        messages: list[Message] = await retry_on_flood(bot.send_media_group)(chat_id, media_docs)
+        messages: list[Message] = await retry_on_flood(bot.send_media_group)(
+            chat_id,
+            media_docs,
+            reply_markup=InlineKeyboardMarkup([footer])
+        )
 
     # Save file ids
     if download and media_docs:
@@ -440,24 +454,6 @@ async def send_manga_chapter(client, data, chat_id):
         await db.add(chapter_file)
 
 
-def is_pagination_data(callback: CallbackQuery):
-    data = callback.data
-    match = re.match(r'\d+_\d+', data)
-    if not match:
-        return False
-    pagination_id = int(data.split('_')[0])
-    if pagination_id not in paginations:
-        return False
-    pagination = paginations[pagination_id]
-    if not pagination.message:
-        return False
-    if pagination.message.chat.id != callback.from_user.id:
-        return False
-    if pagination.message.id != callback.message.id:
-        return False
-    return True
-
-
 async def get_user_lock(chat_id: int):
     async with asyncio.Lock():
         lock = locks.get(chat_id)
@@ -470,14 +466,15 @@ async def get_user_lock(chat_id: int):
 async def on_callback_query(client, callback: CallbackQuery):
     if callback.data in chapters:
         await chapter_click(client, callback.data, callback.from_user.id)
-    elif is_pagination_data(callback):
+    elif callback.data.startswith('pagination'):
         await pagination_click(client, callback)
     elif callback.data.startswith('search'):
         await search_click(client, callback)
     elif callback.data.startswith('options'):
         await options_click(client, callback)
     else:
-        return await bot.answer_callback_query(callback.id, 'This is an old button, please redo the search', show_alert=True)
+        await bot.answer_callback_query(callback.id, 'This is an old button, please redo the search', show_alert=True)
+        return
     try:
         await callback.answer()
     except BaseException as e:

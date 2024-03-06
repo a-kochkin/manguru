@@ -10,18 +10,37 @@ class Pagination:
     def __init__(self):
         self.id = self.pagination_id
         Pagination.pagination_id += 1
-        self.page = 1
         self.count = 20
-        self.message: Message = None
-        self.chapters: List[MangaChapter] = None
+        self.chapters: List[str] = None
 
-    def get_chapters(self):
-        return self.chapters[(self.page - 1) * self.count:self.page * 20]
+    def get_chapters(self, page: int):
+        return self.chapters[(page - 1) * self.count:page * 20]
 
-    @property
-    def is_first_page(self):
-        return self.page == 1
+    @staticmethod
+    def get_prev_page(page: int):
+        if page == 1:
+            return None
+        return page - 1
 
-    @property
-    def is_last_page(self):
-        return self.page == (len(self.chapters) + self.count - 1) // self.count
+    def get_next_page(self, page: int):
+        if page == (len(self.chapters) + self.count - 1) // self.count:
+            return None
+        return page + 1
+
+    def get_prev_chapter(self, target: str):
+        for i, chapter in enumerate(self.chapters):
+            if target == chapter:
+                if i == 0:
+                    return None
+                else:
+                    return self.chapters[i - 1]
+        return None
+
+    def get_next_chapter(self, target: str):
+        for i, chapter in enumerate(self.chapters):
+            if target == chapter:
+                if i == len(self.chapters) - 1:
+                    return None
+                else:
+                    return self.chapters[i + 1]
+        return None
