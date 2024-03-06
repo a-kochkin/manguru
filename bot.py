@@ -435,8 +435,7 @@ async def send_manga_chapter(client, data, chat_id):
         media_docs[-1].caption = success_caption
         messages: list[Message] = await retry_on_flood(bot.send_media_group)(
             chat_id,
-            media_docs,
-            reply_markup=InlineKeyboardMarkup([footer])
+            media_docs
         )
 
     # Save file ids
