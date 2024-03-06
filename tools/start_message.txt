@@ -1,0 +1,5 @@
+Welcome to the best manga pdf bot in telegram!!
+
+Use /search to get started.
+
+Check /help for more information.

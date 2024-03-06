@@ -1,5 +1,5 @@
 import os
-from abc import abstractmethod, ABC
+from abc import abstractmethod
 from dataclasses import dataclass
 from typing import List, AsyncIterable
 
@@ -16,6 +16,7 @@ class MangaCard:
     name: str
     url: str
     picture_url: str
+    additional: str
 
     def get_url(self):
         return self.url
@@ -135,7 +136,7 @@ class MangaClient(ClientSession, metaclass=LanguageSingleton):
         raise NotImplementedError
 
     @abstractmethod
-    async def get_chapters(self, manga_card: MangaCard, page: int = 1) -> List[MangaChapter]:
+    async def get_chapters(self, manga_card: MangaCard) -> List[MangaChapter]:
         raise NotImplementedError
 
     @abstractmethod

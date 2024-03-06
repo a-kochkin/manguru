@@ -1,31 +1,26 @@
-import enum
-import shutil
-from ast import arg
 import asyncio
-import re
-from dataclasses import dataclass
 import datetime as dt
-import json
+import enum
+import os
+import re
+import shutil
+from typing import Dict
 
 import pyrogram.errors
-from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery, InputMediaDocument
+from loguru import logger
+from pyrogram import Client, filters
+from pyrogram.types import CallbackQuery, Message, InlineQuery, \
+    InlineKeyboardMarkup, InlineKeyboardButton, InputMediaDocument, InlineQueryResultArticle, \
+    InputTextMessageContent
 
 from config import env_vars, dbname
 from img2cbz.core import fld2cbz
 from img2pdf.core import fld2pdf, fld2thumb
 from img2tph.core import img2tph
-from plugins import MangaClient, ManhuaKoClient, MangaCard, MangaChapter, ManhuaPlusClient, TMOClient, MangaDexClient, \
-    MangaSeeClient, MangasInClient, McReaderClient, MangaKakalotClient, ManganeloClient, ManganatoClient, \
-    KissMangaClient, MangatigreClient, MangaHasuClient, MangaBuddyClient, AsuraScansClient, NineMangaClient, \
-    ReadMangaClient, MintMangaClient, DesuMeClient
-import os
-
-from pyrogram import Client, filters
-from typing import Dict, Tuple, List, TypedDict
-from loguru import logger
-
-from models.db import DB, ChapterFile, Subscription, LastChapter, MangaName, MangaOutput
+from models.db import DB, ChapterFile, Subscription, MangaOutput
 from pagination import Pagination
+from plugins import MangaClient, MangaCard, MangaChapter, \
+    ReadMangaClient, MintMangaClient
 from plugins.client import clean
 from tools.flood import retry_on_flood
 
@@ -33,47 +28,24 @@ mangas: Dict[str, MangaCard] = dict()
 chapters: Dict[str, MangaChapter] = dict()
 pdfs: Dict[str, str] = dict()
 paginations: Dict[int, Pagination] = dict()
-queries: Dict[str, Tuple[MangaClient, str]] = dict()
-full_pages: Dict[str, List[str]] = dict()
-favourites: Dict[str, MangaCard] = dict()
-language_query: Dict[str, Tuple[str, str]] = dict()
 users_in_channel: Dict[int, dt.datetime] = dict()
 locks: Dict[int, asyncio.Lock] = dict()
 
 plugin_dicts: Dict[str, Dict[str, MangaClient]] = {
-    "🇬🇧 EN": {
-        "MangaDex": MangaDexClient(),
-        "Manhuaplus": ManhuaPlusClient(),
-        "Mangasee": MangaSeeClient(),
-        "McReader": McReaderClient(),
-        "MagaKakalot": MangaKakalotClient(),
-        "Manganelo": ManganeloClient(),
-        "Manganato": ManganatoClient(),
-        "KissManga": KissMangaClient(),
-        "MangaHasu": MangaHasuClient(),
-        "MangaBuddy": MangaBuddyClient(),
-        "AsuraScans": AsuraScansClient(),
-        "NineManga": NineMangaClient(),
-    },
-    "🇪🇸 ES": {
-        "MangaDex": MangaDexClient(language=("es-la", "es")),
-        "ManhuaKo": ManhuaKoClient(),
-        "TMO": TMOClient(),
-        "Mangatigre": MangatigreClient(),
-        "NineManga": NineMangaClient(language='es'),
-        "MangasIn": MangasInClient(),
-    },
-    "🇷🇺 RU": {
-        "ReadManga": ReadMangaClient(),
-        "MintManga": MintMangaClient(),
-        "DesuMe": DesuMeClient()
+    '🇷🇺 RU': {
+        'ReadManga': ReadMangaClient(),
+        'MintManga': MintMangaClient()
     }
 }
 
-cache_dir = "cache"
+cache_dir = 'cache'
 if os.path.exists(cache_dir):
     shutil.rmtree(cache_dir)
-with open("tools/help_message.txt", "r") as f:
+
+with open('tools/start_message.txt', 'r') as f:
+    start_msg = f.read()
+
+with open('tools/help_message.txt', 'r') as f:
     help_msg = f.read()
 
 
@@ -92,17 +64,17 @@ class OutputOptions(enum.IntEnum):
         return self.value | other
 
 
-disabled = ["[🇬🇧 EN] McReader", "[🇬🇧 EN] Manhuaplus"]
+disabled = []
 
 plugins = dict()
-for lang, plugin_dict in plugin_dicts.items():
+for plugin_lang, plugin_dict in plugin_dicts.items():
     for name, plugin in plugin_dict.items():
-        identifier = f'[{lang}] {name}'
+        identifier = f'[{plugin_lang}] {name}'
         if identifier in disabled:
             continue
         plugins[identifier] = plugin
 
-subsPaused = disabled + ["[🇷🇺 RU] DesuMe"]
+subsPaused = disabled + []
 
 
 def split_list(li):
@@ -112,10 +84,27 @@ def split_list(li):
 def get_buttons_for_options(user_options: int):
     buttons = []
     for option in OutputOptions:
-        checked = "✅" if option & user_options else "❌"
+        checked = '✅' if option & user_options else '❌'
         text = f'{checked} {option.name}'
-        buttons.append([InlineKeyboardButton(text, f"options_{option.value}")])
+        buttons.append([InlineKeyboardButton(text, f'options_{option.value}')])
     return InlineKeyboardMarkup(buttons)
+
+
+def get_buttons_for_chapters(pagination: Pagination):
+    results = pagination.get_chapters()
+
+    prev = InlineKeyboardButton('<<', f'{pagination.id}_{pagination.page - 1}')
+    next_ = InlineKeyboardButton('>>', f'{pagination.id}_{pagination.page + 1}')
+
+    footer = []
+    if not pagination.is_first_page:
+        footer.append(prev)
+    if not pagination.is_last_page:
+        footer.append(next_)
+
+    return InlineKeyboardMarkup([footer] + [
+        [InlineKeyboardButton(result.name, result.unique())] for result in results
+    ] + [footer])
 
 
 bot = Client('bot',
@@ -128,6 +117,10 @@ if dbname:
     DB(dbname)
 else:
     DB()
+
+
+def manga_unique_filter(_, client: Client, message: Message):
+    return message.text in mangas
 
 
 @bot.on_message(filters=~(filters.private & filters.incoming))
@@ -148,13 +141,13 @@ async def on_private_message(client: Client, message: Message):
             users_in_channel[message.from_user.id] = dt.datetime.now()
             return message.continue_propagation()
     except pyrogram.errors.UsernameNotOccupied:
-        logger.debug("Channel does not exist, therefore bot will continue to operate normally")
+        logger.debug('Channel does not exist, therefore bot will continue to operate normally')
         return message.continue_propagation()
     except pyrogram.errors.ChatAdminRequired:
-        logger.debug("Bot is not admin of the channel, therefore bot will continue to operate normally")
+        logger.debug('Bot is not admin of the channel, therefore bot will continue to operate normally')
         return message.continue_propagation()
     except pyrogram.errors.UserNotParticipant:
-        await message.reply("In order to use the bot you must join it's update channel.",
+        await message.reply("In order to use the bot you must join it's update channel.'",
                             reply_markup=InlineKeyboardMarkup(
                                 [[InlineKeyboardButton('Join!', url=f't.me/{channel}')]]
                             ))
@@ -168,16 +161,17 @@ async def on_private_message(client: Client, message: Message):
 
 @bot.on_message(filters=filters.command(['start']))
 async def on_start(client: Client, message: Message):
-    logger.info(f"User {message.from_user.id} started the bot")
-    await message.reply("Welcome to the best manga pdf bot in telegram!!\n"
-                        "\n"
-                        "How to use? Just type the name of some manga you want to keep up to date.\n"
-                        "\n"
-                        "For example:\n"
-                        "`Fire Force`\n"
-                        "\n"
-                        "Check /help for more information.")
-    logger.info(f"User {message.from_user.id} finished the start command")
+    logger.info(f'User {message.from_user.id} started the bot')
+    await message.reply(start_msg)
+    logger.info(f'User {message.from_user.id} finished the start command')
+
+
+@bot.on_message(filters=filters.command(['search']))
+async def on_search(client: Client, message: Message):
+    await message.reply('Select search languages.', reply_markup=InlineKeyboardMarkup(
+        split_list([InlineKeyboardButton(language, callback_data=f'search_{language}')
+                    for language in plugin_dicts.keys()])
+    ))
 
 
 @bot.on_message(filters=filters.command(['help']))
@@ -196,16 +190,16 @@ async def on_refresh(client: Client, message: Message):
     document = message.reply_to_message.document
     if not (message.reply_to_message and message.reply_to_message.outgoing and
             ((document and document.file_name[-4:].lower() in ['.pdf', '.cbz']) or match)):
-        return await message.reply("This command only works when it replies to a manga file that bot sent to you")
+        return await message.reply('This command only works when it replies to a manga file that bot sent to you')
     db = DB()
     if document:
         chapter = await db.get_chapter_file_by_id(document.file_unique_id)
     else:
         chapter = await db.get_chapter_file_by_id(match.group(1))
     if not chapter:
-        return await message.reply("This file was already refreshed")
+        return await message.reply('This file was already refreshed')
     await db.erase(chapter)
-    return await message.reply("File refreshed successfully!")
+    return await message.reply('File refreshed successfully!')
 
 
 @bot.on_message(filters=filters.command(['subs']))
@@ -225,45 +219,103 @@ async def on_subs(client: Client, message: Message):
 
     if not lines:
         if filter_:
-            return await message.reply("You have no subscriptions with that filter.")
-        return await message.reply("You have no subscriptions yet.")
+            return await message.reply('You have no subscriptions with that filter.')
+        return await message.reply('You have no subscriptions yet.')
 
-    text = "\n".join(lines)
-    await message.reply(f'Your subscriptions:\n\n{text}\nTo see more subscriptions use `/subs filter`', disable_web_page_preview=True)
+    text = '\n'.join(lines)
+    await message.reply(f'Your subscriptions:\n\n{text}\nTo see more subscriptions use `/subs filter`',
+                        disable_web_page_preview=True)
 
 
 @bot.on_message(filters=filters.regex(r'^/cancel ([^ ]+)$'))
-async def on_cancel_command(client: Client, message: Message):
+async def on_cancel(client: Client, message: Message):
     db = DB()
     sub = await db.get(Subscription, (message.matches[0].group(1), str(message.from_user.id)))
     if not sub:
-        return await message.reply("You were not subscribed to that manga.")
+        return await message.reply('You were not subscribed to that manga.')
     await db.erase(sub)
-    return await message.reply("You will no longer receive updates for that manga.")
+    return await message.reply('You will no longer receive updates for that manga.')
 
 
 @bot.on_message(filters=filters.command(['options']))
-async def on_options_command(client: Client, message: Message):
+async def on_options(client: Client, message: Message):
     db = DB()
     user_options = await db.get(MangaOutput, str(message.from_user.id))
     user_options = user_options.output if user_options else (1 << 30) - 4
     buttons = get_buttons_for_options(user_options)
-    return await message.reply("Select the desired output format.", reply_markup=buttons)
+    return await message.reply('Select the desired output format.', reply_markup=buttons)
 
 
 @bot.on_message(filters=filters.regex(r'^/'))
 async def on_unknown_command(client: Client, message: Message):
-    await message.reply("Unknown command")
+    await message.reply('Unknown command')
 
 
-@bot.on_message(filters=filters.text)
-async def on_message(client, message: Message):
-    language_query[f"lang_None_{hash(message.text)}"] = (None, message.text)
-    for language in plugin_dicts.keys():
-        language_query[f"lang_{language}_{hash(message.text)}"] = (language, message.text)
-    await bot.send_message(message.chat.id, "Select search languages.", reply_markup=InlineKeyboardMarkup(
-        split_list([InlineKeyboardButton(language, callback_data=f"lang_{language}_{hash(message.text)}")
-                    for language in plugin_dicts.keys()])
+@bot.on_message(filters.create(manga_unique_filter))
+async def on_message(client: Client, message: Message):
+    manga = mangas[message.text]
+
+    pagination = Pagination()
+    paginations[pagination.id] = pagination
+    results = await manga.client.get_chapters(manga)
+    for result in results:
+        chapters[result.unique()] = result
+    pagination.chapters = results
+    buttons = get_buttons_for_chapters(pagination)
+
+    try:
+        message = await bot.send_photo(message.from_user.id,
+                                       manga.picture_url,
+                                       f'{manga.name}\n'
+                                       f'{manga.get_url()}', reply_markup=buttons)
+        pagination.message = message
+    except pyrogram.errors.BadRequest:
+        file_name = f'pictures/{manga.unique()}.jpg'
+        await manga.client.get_cover(manga, cache=True, file_name=file_name)
+        message = await bot.send_photo(message.from_user.id,
+                                       f'./cache/{manga.client.name}/{file_name}',
+                                       f'{manga.name}\n'
+                                       f'{manga.get_url()}', reply_markup=buttons)
+        pagination.message = message
+
+
+@bot.on_inline_query()
+async def on_inline_query(client: Client, inline_query: InlineQuery):
+    for ident, manga_client in plugins.items():
+        if inline_query.query.startswith(ident):
+            query = inline_query.query[len(ident):].strip()
+
+            if not query:
+                return await client.answer_inline_query(inline_query.id, results=[])
+            results = await manga_client.search(query)
+            if not results:
+                return await client.answer_inline_query(inline_query.id, results=[])
+            for result in results:
+                mangas[result.unique()] = result
+            return await inline_query.answer(
+                results=[
+                    InlineQueryResultArticle(
+                        title=result.name,
+                        thumb_url=result.picture_url,
+                        description=result.additional,
+                        input_message_content=InputTextMessageContent(result.unique())
+                    ) for result in results
+                ]
+            )
+
+
+async def search_click(client, callback: CallbackQuery):
+    lang = callback.data.split('_')[-1]
+
+    if lang == 'unset':
+        return await callback.message.edit('Select search languages.', reply_markup=InlineKeyboardMarkup(
+            split_list([InlineKeyboardButton(language, callback_data=f'search_{language}')
+                        for language in plugin_dicts.keys()])
+        ))
+    await callback.message.edit(f'Language: {lang}\n\nSelect search plugin.', reply_markup=InlineKeyboardMarkup(
+        split_list([InlineKeyboardButton(ident, switch_inline_query_current_chat=f'[{lang}] {ident} ')
+                    for ident in plugin_dicts[lang].keys() if f'[{lang}] {ident}' not in disabled]) + [
+            [InlineKeyboardButton('◀️ Back', callback_data=f'search_unset')]]
     ))
 
 
@@ -279,115 +331,24 @@ async def options_click(client, callback: CallbackQuery):
     return await callback.message.edit_reply_markup(reply_markup=buttons)
 
 
-async def language_click(client, callback: CallbackQuery):
-    lang, query = language_query[callback.data]
-    if not lang:
-        return await callback.message.edit("Select search languages.", reply_markup=InlineKeyboardMarkup(
-            split_list([InlineKeyboardButton(language, callback_data=f"lang_{language}_{hash(query)}")
-                        for language in plugin_dicts.keys()])
-        ))
-    for identifier, manga_client in plugin_dicts[lang].items():
-        queries[f"query_{lang}_{identifier}_{hash(query)}"] = (manga_client, query)
-    await callback.message.edit(f"Language: {lang}\n\nSelect search plugin.", reply_markup=InlineKeyboardMarkup(
-        split_list([InlineKeyboardButton(identifier, callback_data=f"query_{lang}_{identifier}_{hash(query)}")
-                    for identifier in plugin_dicts[lang].keys() if f'[{lang}] {identifier}' not in disabled]) + [
-            [InlineKeyboardButton("◀️ Back", callback_data=f"lang_None_{hash(query)}")]]
-    ))
-
-
-async def plugin_click(client, callback: CallbackQuery):
-    manga_client, query = queries[callback.data]
-    results = await manga_client.search(query)
-    if not results:
-        await bot.send_message(callback.from_user.id, "No manga found for given query.")
-        return
-    for result in results:
-        mangas[result.unique()] = result
-    await bot.send_message(callback.from_user.id,
-                           "This is the result of your search",
-                           reply_markup=InlineKeyboardMarkup([
-                               [InlineKeyboardButton(result.name, callback_data=result.unique())] for result in results
-                           ]))
-
-
-async def manga_click(client, callback: CallbackQuery, pagination: Pagination = None):
-    if pagination is None:
-        pagination = Pagination()
-        paginations[pagination.id] = pagination
-
-    if pagination.manga is None:
-        manga = mangas[callback.data]
-        pagination.manga = manga
-
-    results = await pagination.manga.client.get_chapters(pagination.manga, pagination.page)
-
-    if not results:
-        await callback.answer("Ups, no chapters there.", show_alert=True)
-        return
-
-    full_page_key = f'full_page_{hash("".join([result.unique() for result in results]))}'
-    full_pages[full_page_key] = []
-    for result in results:
-        chapters[result.unique()] = result
-        full_pages[full_page_key].append(result.unique())
-
-    db = DB()
-    subs = await db.get(Subscription, (pagination.manga.url, str(callback.from_user.id)))
-
-    prev = [InlineKeyboardButton('<<', f'{pagination.id}_{pagination.page - 1}')]
-    next_ = [InlineKeyboardButton('>>', f'{pagination.id}_{pagination.page + 1}')]
-    footer = [prev + next_] if pagination.page > 1 else [next_]
-
-    fav = [[InlineKeyboardButton(
-        "Unsubscribe" if subs else "Subscribe",
-        f"{'unfav' if subs else 'fav'}_{pagination.manga.unique()}"
-    )]]
-    favourites[f"fav_{pagination.manga.unique()}"] = pagination.manga
-    favourites[f"unfav_{pagination.manga.unique()}"] = pagination.manga
-
-    full_page = [[InlineKeyboardButton('Full Page', full_page_key)]]
-
-    buttons = InlineKeyboardMarkup(fav + footer + [
-        [InlineKeyboardButton(result.name, result.unique())] for result in results
-    ] + full_page + footer)
-
-    if pagination.message is None:
-        try:
-            message = await bot.send_photo(callback.from_user.id,
-                                           pagination.manga.picture_url,
-                                           f'{pagination.manga.name}\n'
-                                           f'{pagination.manga.get_url()}', reply_markup=buttons)
-            pagination.message = message
-        except pyrogram.errors.BadRequest as e:
-            file_name = f'pictures/{pagination.manga.unique()}.jpg'
-            await pagination.manga.client.get_cover(pagination.manga, cache=True, file_name=file_name)
-            message = await bot.send_photo(callback.from_user.id,
-                                           f'./cache/{pagination.manga.client.name}/{file_name}',
-                                           f'{pagination.manga.name}\n'
-                                           f'{pagination.manga.get_url()}', reply_markup=buttons)
-            pagination.message = message
-    else:
-        await bot.edit_message_reply_markup(
-            callback.from_user.id,
-            pagination.message.id,
-            reply_markup=buttons
-        )
-
-users_lock = asyncio.Lock()
-
-
-async def get_user_lock(chat_id: int):
-    async with users_lock:
-        lock = locks.get(chat_id)
-        if not lock:
-            locks[chat_id] = asyncio.Lock()
-        return locks[chat_id]
-
-
 async def chapter_click(client, data, chat_id):
     async with await get_user_lock(chat_id):
         await send_manga_chapter(client, data, chat_id)
         await asyncio.sleep(5)
+
+
+async def pagination_click(client: Client, callback: CallbackQuery):
+    pagination_id, page = map(int, callback.data.split('_'))
+    pagination = paginations[pagination_id]
+    pagination.page = page
+
+    buttons = get_buttons_for_chapters(pagination)
+
+    await bot.edit_message_reply_markup(
+        callback.from_user.id,
+        pagination.message.id,
+        reply_markup=buttons
+    )
 
 
 async def send_manga_chapter(client, data, chat_id):
@@ -479,49 +440,6 @@ async def send_manga_chapter(client, data, chat_id):
         await db.add(chapter_file)
 
 
-async def pagination_click(client: Client, callback: CallbackQuery):
-    pagination_id, page = map(int, callback.data.split('_'))
-    pagination = paginations[pagination_id]
-    pagination.page = page
-    await manga_click(client, callback, pagination)
-
-
-async def full_page_click(client: Client, callback: CallbackQuery):
-    chapters_data = full_pages[callback.data]
-    for chapter_data in reversed(chapters_data):
-        try:
-            await chapter_click(client, chapter_data, callback.from_user.id)
-        except Exception as e:
-            logger.exception(e)
-
-
-async def favourite_click(client: Client, callback: CallbackQuery):
-    action, data = callback.data.split('_')
-    fav = action == 'fav'
-    manga = favourites[callback.data]
-    db = DB()
-    subs = await db.get(Subscription, (manga.url, str(callback.from_user.id)))
-    if not subs and fav:
-        await db.add(Subscription(url=manga.url, user_id=str(callback.from_user.id)))
-    if subs and not fav:
-        await db.erase(subs)
-    if subs and fav:
-        await callback.answer("You are already subscribed", show_alert=True)
-    if not subs and not fav:
-        await callback.answer("You are not subscribed", show_alert=True)
-    reply_markup = callback.message.reply_markup
-    keyboard = reply_markup.inline_keyboard
-    keyboard[0] = [InlineKeyboardButton(
-        "Unsubscribe" if fav else "Subscribe",
-        f"{'unfav' if fav else 'fav'}_{data}"
-    )]
-    await bot.edit_message_reply_markup(callback.from_user.id, callback.message.id,
-                                        InlineKeyboardMarkup(keyboard))
-    db_manga = await db.get(MangaName, manga.url)
-    if not db_manga:
-        await db.add(MangaName(url=manga.url, name=manga.name))
-
-
 def is_pagination_data(callback: CallbackQuery):
     data = callback.data
     match = re.match(r'\d+_\d+', data)
@@ -540,154 +458,27 @@ def is_pagination_data(callback: CallbackQuery):
     return True
 
 
+async def get_user_lock(chat_id: int):
+    async with asyncio.Lock():
+        lock = locks.get(chat_id)
+        if not lock:
+            locks[chat_id] = asyncio.Lock()
+        return locks[chat_id]
+
+
 @bot.on_callback_query()
 async def on_callback_query(client, callback: CallbackQuery):
-    if callback.data in queries:
-        await plugin_click(client, callback)
-    elif callback.data in mangas:
-        await manga_click(client, callback)
-    elif callback.data in chapters:
+    if callback.data in chapters:
         await chapter_click(client, callback.data, callback.from_user.id)
-    elif callback.data in full_pages:
-        await full_page_click(client, callback)
-    elif callback.data in favourites:
-        await favourite_click(client, callback)
     elif is_pagination_data(callback):
         await pagination_click(client, callback)
-    elif callback.data in language_query:
-        await language_click(client, callback)
+    elif callback.data.startswith('search'):
+        await search_click(client, callback)
     elif callback.data.startswith('options'):
         await options_click(client, callback)
     else:
-        await bot.answer_callback_query(callback.id, 'This is an old button, please redo the search', show_alert=True)
-        return
+        return await bot.answer_callback_query(callback.id, 'This is an old button, please redo the search', show_alert=True)
     try:
         await callback.answer()
     except BaseException as e:
         logger.warning(e)
-
-
-async def remove_subscriptions(sub: str):
-    db = DB()
-
-    await db.erase_subs(sub)
-
-
-async def update_mangas():
-    logger.debug("Updating mangas")
-    db = DB()
-    subscriptions = await db.get_all(Subscription)
-    last_chapters = await db.get_all(LastChapter)
-    manga_names = await db.get_all(MangaName)
-
-    subs_dictionary = dict()
-    chapters_dictionary = dict()
-    url_client_dictionary = dict()
-    client_url_dictionary = {client: set() for client in plugins.values()}
-    manga_dict = dict()
-
-    for subscription in subscriptions:
-        if subscription.url not in subs_dictionary:
-            subs_dictionary[subscription.url] = []
-        subs_dictionary[subscription.url].append(subscription.user_id)
-
-    for last_chapter in last_chapters:
-        chapters_dictionary[last_chapter.url] = last_chapter
-
-    for manga in manga_names:
-        manga_dict[manga.url] = manga
-
-    for url in subs_dictionary:
-        for ident, client in plugins.items():
-            if ident in subsPaused:
-                continue
-            if await client.contains_url(url):
-                url_client_dictionary[url] = client
-                client_url_dictionary[client].add(url)
-
-    for client, urls in client_url_dictionary.items():
-        logger.debug(f'Updating {client.name}')
-        logger.debug(f'Urls:\t{list(urls)}')
-        new_urls = [url for url in urls if not chapters_dictionary.get(url)]
-        logger.debug(f'New Urls:\t{new_urls}')
-        to_check = [chapters_dictionary[url] for url in urls if chapters_dictionary.get(url)]
-        if len(to_check) == 0:
-            continue
-        try:
-            updated, not_updated = await client.check_updated_urls(to_check)
-        except BaseException as e:
-            logger.exception(f"Error while checking updates for site: {client.name}, err: {e}")
-            updated = []
-            not_updated = list(urls)
-        for url in not_updated:
-            del url_client_dictionary[url]
-        logger.debug(f'Updated:\t{list(updated)}')
-        logger.debug(f'Not Updated:\t{list(not_updated)}')
-
-    updated = dict()
-
-    for url, client in url_client_dictionary.items():
-        try:
-            if url not in manga_dict:
-                continue
-            manga_name = manga_dict[url].name
-            if url not in chapters_dictionary:
-                agen = client.iter_chapters(url, manga_name)
-                last_chapter = await anext(agen)
-                await db.add(LastChapter(url=url, chapter_url=last_chapter.url))
-                await asyncio.sleep(10)
-            else:
-                last_chapter = chapters_dictionary[url]
-                new_chapters: List[MangaChapter] = []
-                counter = 0
-                async for chapter in client.iter_chapters(url, manga_name):
-                    if chapter.url == last_chapter.chapter_url:
-                        break
-                    new_chapters.append(chapter)
-                    counter += 1
-                    if counter == 20:
-                        break
-                if new_chapters:
-                    last_chapter.chapter_url = new_chapters[0].url
-                    await db.add(last_chapter)
-                    updated[url] = list(reversed(new_chapters))
-                    for chapter in new_chapters:
-                        if chapter.unique() not in chapters:
-                            chapters[chapter.unique()] = chapter
-                await asyncio.sleep(1)
-        except BaseException as e:
-            logger.exception(f'An exception occurred getting new chapters for url {url}: {e}')
-
-    blocked = set()
-    for url, chapter_list in updated.items():
-        for chapter in chapter_list:
-            logger.debug(f'Updating {chapter.manga.name} - {chapter.name}')
-            for sub in subs_dictionary[url]:
-                if sub in blocked:
-                    continue
-                try:
-                    await send_manga_chapter(bot, chapter.unique(), int(sub))
-                except pyrogram.errors.UserIsBlocked:
-                    logger.info(f'User {sub} blocked the bot')
-                    await remove_subscriptions(sub)
-                    blocked.add(sub)
-                except BaseException as e:
-                    logger.exception(f'An exception occurred sending new chapter: {e}')
-                await asyncio.sleep(0.5)
-            await asyncio.sleep(1)
-
-
-async def manga_updater():
-    minutes = 5
-    while True:
-        wait_time = minutes * 60
-        try:
-            start = dt.datetime.now()
-            await update_mangas()
-            elapsed = dt.datetime.now() - start
-            wait_time = max((dt.timedelta(seconds=wait_time) - elapsed).total_seconds(), 0)
-            logger.debug(f'Time elapsed updating mangas: {elapsed}, waiting for {wait_time}')
-        except BaseException as e:
-            logger.exception(f'An exception occurred during chapters update: {e}')
-        if wait_time:
-            await asyncio.sleep(wait_time)
