@@ -2,7 +2,7 @@ from typing import List
 
 from telegraph.aio import Telegraph
 
-from plugins import MangaChapter
+from clients import MangaChapter
 
 
 async def img2tph(manga_chapter: MangaChapter, name: str):

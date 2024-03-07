@@ -1,7 +1,7 @@
 import os
 from abc import abstractmethod
 from dataclasses import dataclass
-from typing import List, AsyncIterable
+from typing import List, AsyncIterable, Optional
 
 from aiohttp import ClientSession
 from pathlib import Path
@@ -17,6 +17,7 @@ class MangaCard:
     url: str
     picture_url: str
     additional: str
+    chapters: List["MangaChapter"]
 
     def get_url(self):
         return self.url
@@ -136,7 +137,7 @@ class MangaClient(ClientSession, metaclass=LanguageSingleton):
         raise NotImplementedError
 
     @abstractmethod
-    async def get_chapters(self, manga_card: MangaCard) -> List[MangaChapter]:
+    async def set_chapters(self, manga_card: MangaCard) -> MangaCard:
         raise NotImplementedError
 
     @abstractmethod

@@ -7,8 +7,8 @@ __pycache__/
 
 .env
 cache
-bot.session
-bot.session-journal
+Bot.session
+Bot.session-journal
 /test.db
 
 venv

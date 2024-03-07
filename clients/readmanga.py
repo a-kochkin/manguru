@@ -7,7 +7,7 @@ from aiohttp import ClientResponse
 from bs4 import BeautifulSoup
 from bs4.element import PageElement
 
-from plugins.client import MangaClient, MangaCard, MangaChapter, LastChapter
+from clients.client import MangaClient, MangaCard, MangaChapter, LastChapter
 
 
 class ReadMangaClient(MangaClient):
@@ -32,9 +32,7 @@ class ReadMangaClient(MangaClient):
         images = [manga.get('thumbnail') for manga in mangas]
         additional = [manga.get('additional') for manga in mangas]
 
-        mangas = [MangaCard(self, *tup) for tup in zip(names, url, images, additional)]
-
-        return mangas
+        return list(map(lambda x: MangaCard(self, x[0], x[1], x[2], x[3], []), zip(names, url, images, additional)))
 
     def chapters_from_page(self, page: bytes, manga: MangaCard = None):
         bs = BeautifulSoup(page, 'html.parser')
@@ -68,6 +66,17 @@ class ReadMangaClient(MangaClient):
 
         return urls
 
+    async def set_pictures(self, manga_chapter: MangaChapter) -> MangaChapter:
+        requests_url = manga_chapter.url
+
+        response = await self.get(f'{requests_url}?mtr=true')
+
+        content = await response.read()
+
+        manga_chapter.pictures = await self.pictures_from_chapters(content, response)
+
+        return manga_chapter
+
     async def pictures_from_chapters(self, content: bytes, response: ClientResponse = None):
         regex = rb"\[['\"](.*?)['\"],['\"]['\"],['\"](.*?)['\"],\d+,\d+\]"
 
@@ -87,15 +96,17 @@ class ReadMangaClient(MangaClient):
 
         return self.mangas_from_page(content)[(page - 1) * 20:page * 20]
 
-    async def get_chapters(self, manga_card: MangaCard) -> List[MangaChapter]:
+    async def set_chapters(self, manga_card: MangaCard) -> MangaCard:
         request_url = f'{manga_card.url}'
 
         content = await self.get_url(request_url)
 
-        return self.chapters_from_page(content, manga_card)
+        manga_card.chapters = self.chapters_from_page(content, manga_card)
+
+        return manga_card
 
     async def iter_chapters(self, manga_url: str, manga_name) -> AsyncIterable[MangaChapter]:
-        manga_card = MangaCard(self, manga_name, manga_url, '')
+        manga_card = MangaCard(self, manga_name, manga_url, '', '', [])
 
         request_url = f'{manga_card.url}'
 
