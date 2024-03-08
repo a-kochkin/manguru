@@ -1,19 +1,9 @@
 from pyrogram import filters
 from pyrogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
 
+import filters as flt
 from bot import Bot, mangas
 from models import DB, Subscription, MangaName
-
-
-def is_fav_in_dict(_, client: Bot, callback: CallbackQuery):
-    fil = callback.data.startswith('fav') or callback.data.startswith('unfav')
-
-    if not fil:
-        return False
-
-    data = callback.data.split('_')[1]
-
-    return data in mangas
 
 
 @Bot.on_message(filters.command(['favourites']))
@@ -51,7 +41,7 @@ async def on_cancel(client: Bot, message: Message):
     return await message.reply('You will no longer receive updates for that manga.')
 
 
-@Bot.on_callback_query(filters.create(is_fav_in_dict))
+@Bot.on_callback_query(flt.manga('fav_') | flt.manga('unfav_'))
 async def on_callback_query(client, callback: CallbackQuery):
     action, data = callback.data.split('_')
     fav = action == 'fav'
